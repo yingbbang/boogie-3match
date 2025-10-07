@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport"
+      content="width=device-width, initial-scale=1.0, 
+               maximum-scale=1.0, user-scalable=no, 
+               viewport-fit=cover" />
+
+<title>3-Match (1실패=게임오버)</title>
+<style>
+  html,body{
+  touch-action: none;   /* 터치 확대, 스크롤 등 모두 차단 */
+  overflow: hidden;     /* 스크롤 막기 */
+    height:100%;margin:0;background:#222;
+    display:flex;align-items:center;justify-content:center;
+  }
+  canvas{
+    background:#111;cursor:pointer;image-rendering:pixelated;
+  }
+  #hud{
+    position:fixed;top:12px;left:12px;
+    color:#ddd;font:14px/1.4 system-ui,Segoe UI,Arial;
+  }
+  #hud b{color:#fff;}
+</style>
+</head>
+<body>
+<div id="hud">상태: <span id="status">로딩중…</span> | 점수: <b id="score">0</b></div>
+<canvas id="game" width="512" height="512"></canvas>
+
+<script>
+/** ===== 터치 확대/드래그 방지 ===== */
+document.addEventListener('gesturestart', e => e.preventDefault()); // 핀치 확대 방지
+document.addEventListener('dblclick', e => e.preventDefault());     // 더블탭 확대 방지
+document.addEventListener('touchmove', e => {
+  if (e.scale !== 1) e.preventDefault(); // 스케일 확대 방지
+}, { passive: false });
+
+/** ===== 설정 ===== */
+const ROWS=8, COLS=8, BLOCK_SIZE=64, TYPES=5;
+const IMG_NAMES = Array.from({length:TYPES}, (_,i)=>`block${i+1}.png`); // image 폴더 내에 배치
+const USE_FALLBACK_IF_IMG_FAILS = true;
+
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+const statusEl = document.getElementById('status');
+const scoreEl = document.getElementById('score');
+
+let grid = Array.from({length:ROWS}, ()=>Array(COLS).fill(0));
+let images = new Array(TYPES).fill(null);
+let imagesReady = false;
+let selected = null;
+let busy = false;
+let score = 0;
+
+/** ===== 유틸 ===== */
+const clamp=(v,min,max)=>Math.max(min,Math.min(max,v));
+function inBounds(r,c){ return r>=0 && r<ROWS && c>=0 && c<COLS; }
+function randInt(n){ return Math.floor(Math.random()*n); }
+function randomBlock(){ return randInt(TYPES); }
+function wait(ms){ return new Promise(r=>setTimeout(r,ms)); }
+
+/** ===== 이미지 프리로드 ===== */
+function loadImages(names){
+  return Promise.all(names.map((name,idx)=> new Promise(resolve=>{
+    const img = new Image();
+    img.onload = ()=>{ images[idx]=img; resolve({ok:true}); };
+    img.onerror = ()=>{ resolve({ok:false}); };
+    img.src = './image/' + name;   // ✅ 수정됨: image 폴더에서 불러오기
+  })));
+}
+
+/** ===== 초기화 ===== */
+async function boot(){
+  const results = await loadImages(IMG_NAMES);
+  const anyFail = results.some(r=>!r.ok);
+  imagesReady = true;
+  statusEl.textContent = anyFail && USE_FALLBACK_IF_IMG_FAILS
+    ? '일부 이미지 실패(색 블럭 대체)'
+    : '준비완료';
+
+  restartGame();
+  requestAnimationFrame(loop);
+}
+
+function restartGame(){
+  score = 0; updateScore();
+  initGridNoMatches();
+}
+
+function updateScore(){ scoreEl.textContent = String(score); }
+
+function initGridNoMatches(){
+  // 매치 없는 상태로 스타트
+  do {
+    for (let r=0;r<ROWS;r++){
+      for (let c=0;c<COLS;c++){
+        grid[r][c] = randomBlock();
+      }
+    }
+  } while (findMatches().length>0);
+}
+
+/** ===== 매치 탐색 ===== */
+function findMatches(){
+  const marked = new Set();
+  // 가로
+  for (let r=0;r<ROWS;r++){
+    let run=1;
+    for (let c=1;c<=COLS;c++){
+      if (c<COLS && grid[r][c]===grid[r][c-1]) run++;
+      else {
+        if (run>=3){ for (let k=c-run;k<c;k++) marked.add(r+','+k); }
+        run=1;
+      }
+    }
+  }
+  // 세로
+  for (let c=0;c<COLS;c++){
+    let run=1;
+    for (let r=1;r<=ROWS;r++){
+      if (r<ROWS && grid[r][c]===grid[r-1][c]) run++;
+      else {
+        if (run>=3){ for (let k=r-run;k<r;k++) marked.add(k+','+c); }
+        run=1;
+      }
+    }
+  }
+  return Array.from(marked).map(s=>{
+    const [rs,cs]=s.split(','); return {r:+rs,c:+cs};
+  });
+}
+
+/** ===== 터뜨리기 & 낙하 ===== */
+function removeMatchesOnce(){
+  const matches = findMatches();
+  if (!matches.length) return 0;
+
+  // 제거
+  for (const {r,c} of matches) grid[r][c] = null;
+
+  // 낙하
+  for (let c=0;c<COLS;c++){
+    let write = ROWS-1;
+    for (let r=ROWS-1;r>=0;r--){
+      if (grid[r][c]!==null){
+        grid[write][c] = grid[r][c];
+        write--;
+      }
+    }
+    for (let r=write;r>=0;r--) grid[r][c] = randomBlock();
+  }
+
+  // 점수(기본: 제거수 * 10)
+  score += matches.length * 10;
+  updateScore();
+
+  return matches.length;
+}
+
+async function resolveChains(){
+  while (true){
+    const removed = removeMatchesOnce();
+    if (!removed) break;
+    draw();
+    await wait(150);
+  }
+}
+
+/** ===== 스왑 ===== */
+function swap(a,b){
+  const t = grid[a.r][a.c];
+  grid[a.r][a.c] = grid[b.r][b.c];
+  grid[b.r][b.c] = t;
+}
+
+/** ===== 게임오버 ===== */
+async function gameOver(){
+  busy = true;
+  await wait(50);
+  alert(`게임 오버!\n점수: ${score}`);
+  restartGame();
+  selected = null;
+  busy = false;
+}
+
+/** ===== 입력 ===== */
+canvas.addEventListener('click', async (e)=>{
+  if (busy) return;
+  const rect = canvas.getBoundingClientRect();
+  const x = clamp(e.clientX - rect.left, 0, canvas.width  - 1);
+  const y = clamp(e.clientY - rect.top , 0, canvas.height - 1);
+  const cell = { r: Math.floor(y/BLOCK_SIZE), c: Math.floor(x/BLOCK_SIZE) };
+  if (!inBounds(cell.r,cell.c)) return;
+
+  if (!selected){ selected = cell; return; }
+
+  if (selected.r===cell.r && selected.c===cell.c){
+    selected = null; return;
+  }
+
+  const dist = Math.abs(selected.r-cell.r) + Math.abs(selected.c-cell.c);
+  if (dist!==1){ selected = cell; return; }
+
+  busy = true;
+  swap(selected, cell);
+  draw();
+
+  if (findMatches().length===0){
+    await wait(120);
+    swap(selected, cell);
+    draw();
+    await gameOver();
+  } else {
+    await resolveChains();
+  }
+
+  selected = null;
+  busy = false;
+});
+
+/** ===== 렌더링 ===== */
+function draw(){
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+  for (let r=0;r<ROWS;r++){
+    for (let c=0;c<COLS;c++){
+      const t = grid[r][c];
+      const x = c*BLOCK_SIZE, y = r*BLOCK_SIZE;
+      if (t===null) continue;
+
+      if (imagesReady && images[t]){
+        ctx.drawImage(images[t], x, y, BLOCK_SIZE, BLOCK_SIZE);
+      } else {
+        ctx.fillStyle = ['#66c','#c66','#6c6','#cc6','#6cc'][t%5];
+        ctx.fillRect(x,y,BLOCK_SIZE,BLOCK_SIZE);
+        ctx.fillStyle = 'rgba(0,0,0,.15)';
+        ctx.fillRect(x,y,BLOCK_SIZE,BLOCK_SIZE);
+      }
+    }
+  }
+  if (selected){
+    ctx.lineWidth = 4;
+    ctx.strokeStyle = 'yellow';
+    ctx.strokeRect(selected.c*BLOCK_SIZE, selected.r*BLOCK_SIZE, BLOCK_SIZE, BLOCK_SIZE);
+  }
+}
+
+/** ===== 루프 ===== */
+function loop(){ draw(); requestAnimationFrame(loop); }
+
+boot();
+</script>
+</body>
+</html>
